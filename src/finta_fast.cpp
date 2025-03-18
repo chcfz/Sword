@@ -15,16 +15,172 @@
 #define M_E 2.718281828459045
 #include <cmath>
 #include <random>
-
+#include <regex>
 //const static float EXTEND_RATE = 0.5;
 //const static int LOOK_AHEAD_DEPTH = 10;
-// float COSUME_WEIGHT = 0.1;
 float DECAY_WEIGHT = 1.0;
 float SINGLE_GROUP_TH = 0.25;
 float SWAP_PRIOR_TH = 0.4;
 float NODE_PRIOR_TH = 0.5;
 bool opt_fidelity = false;
 
+std::vector<Circuit *> load_circuits(char *file_path) {
+    std::ifstream file(file_path); // 打开文件
+    if (!file.is_open()) {
+        std::cout << "Failed to open file." << std::endl;
+        exit(0);
+    }
+
+    std::vector<Circuit *> circuits;
+    Circuit *circuit = new Circuit();
+    circuit->type = Main;
+    std::string line;
+    std::smatch matches;
+    while (std::getline(file, line)) {
+        std::regex qreg_pattern(R"(\wreg \w\[(\d+)\];)");
+        if (std::regex_match(line, matches, qreg_pattern)) {
+            if (line[0] == 'q')
+                circuit->qubit_number = std::stoi(matches[1].str());
+            else {
+                std::getline(file, line);
+                break;
+            }
+        } else if (circuit->qubit_number > 0) break;
+    }
+
+    //this->qubit_gate_list = vector<vector<Gate *>>(qubit_number, vector<Gate *>());
+
+    std::regex gate_pattern(R"(.+?\s+q\[(\d+)\](?:,\s*q\[(\d+)\])?;)");
+    std::regex control_start_pattern(R"(\s*(\w+)\s*\(.+?\)\s*\{)");
+    std::regex control_end_pattern(R"(\s*?})");
+    Gate* gate;
+    Node* node;
+    Node* qbit_last_node[circuit->qubit_number] = {nullptr};
+    circuit->logical_bit_node_list = vector<vector<int>>(circuit->qubit_number, vector<int>());
+    vector<vector<Gate *>> tmp_h_gate_list = vector<vector<Gate *>>(circuit->qubit_number, vector<Gate *>());
+    do { // 逐行读取文件
+        if (std::regex_match(line, matches, gate_pattern)) { // 匹配每一行
+            //std::cout << "Match found: " << matches[0] << std::endl;
+            
+            // 将捕获的数字字符串转换为整数
+            int q1 = std::stoi(matches[1].str());
+
+            // 检查并处理第二个捕获组
+            if (matches[2].matched) {
+                int q2 = std::stoi(matches[2].str());
+                gate = new Gate(CX, circuit->gate_list.size(), q1, q2);
+                node = new Node(circuit->node_list.size());
+                node->cx_gate = gate;
+                gate->owner = node;
+                node->control_h_gate_list.swap(tmp_h_gate_list[q1]);
+                node->target_h_gate_list.swap(tmp_h_gate_list[q2]);
+                if (qbit_last_node[q1]) {
+                    qbit_last_node[q1]->add_successors(node);
+                }
+                if (qbit_last_node[q2]) {
+                    qbit_last_node[q2]->add_successors(node);
+                }
+                qbit_last_node[q1] = node;
+                qbit_last_node[q2] = node;
+                circuit->node_list.push_back(node);
+                circuit->logical_bit_node_list[q1].push_back(node->id);
+                circuit->logical_bit_node_list[q2].push_back(node->id);
+                //std::cout << "CX " << q1 << q2 << std::endl;
+                
+            } else {
+                //std::cout<< "H " << q1 << std::endl;
+                if (line[0] == 't')
+                    gate = new Gate(T, circuit->gate_list.size(), q1, -1);
+                else
+                    gate = new Gate(H, circuit->gate_list.size(), q1, -1);
+                tmp_h_gate_list[q1].push_back(gate);
+            }
+            circuit->gate_list.push_back(gate);
+            //this->qubit_gate_list[gate->control].push_back(gate);
+            //if (gate->target != -1) this->qubit_gate_list[gate->target].push_back(gate);
+        } else if (std::regex_match(line, matches, control_start_pattern)) {
+            circuit->left_h_gate_each_bit.swap(tmp_h_gate_list);
+            tmp_h_gate_list = vector<vector<Gate *>>(circuit->qubit_number, vector<Gate *>());
+            circuits.push_back(circuit);
+            circuit = new Circuit();
+            circuit->qubit_number = circuits[0]->qubit_number;
+            circuit->logical_bit_node_list = vector<vector<int>>(circuit->qubit_number, vector<int>());
+            if (line[0] == 'i') {
+                circuit->type = If;
+            } else {
+                circuit->type = While;
+            }
+
+            for (int i = 0; i<circuit->qubit_number; i++) {
+                qbit_last_node[i] = nullptr;
+            }
+
+        } else if (std::regex_match(line, matches, control_end_pattern) ) {
+            circuit->left_h_gate_each_bit.swap(tmp_h_gate_list);
+            tmp_h_gate_list = vector<vector<Gate *>>(circuit->qubit_number, vector<Gate *>());
+            circuits.push_back(circuit);
+            circuit = new Circuit();
+            circuit->qubit_number = circuits[0]->qubit_number;
+            circuit->logical_bit_node_list = vector<vector<int>>(circuit->qubit_number, vector<int>());
+            circuit->type = Main;
+
+            for (int i = 0; i<circuit->qubit_number; i++) {
+                qbit_last_node[i] = nullptr;
+            }
+        }
+    } while (std::getline(file, line));
+    circuit->left_h_gate_each_bit.swap(tmp_h_gate_list);
+    circuits.push_back(circuit);
+    file.close(); // 关闭文件
+    return circuits;
+}
+
+void dump_result(char * result_path, std::deque<Gate> &output, int qubit_number, std::vector<double> run_time_list) {
+    // 获取文件所在的文件夹路径
+    std::filesystem::path dir = std::filesystem::path(result_path).parent_path();
+
+    // 如果文件夹不存在，则创建文件夹
+    if (!std::filesystem::exists(dir)) {
+        std::filesystem::create_directories(dir);
+    }
+
+    // 以覆盖的方式写入文件
+    std::ofstream file(result_path, std::ios::out | std::ios::trunc);
+
+    if (file.is_open()) {
+        file << "//";
+        for (double run_time:run_time_list) {
+            file << run_time << " ";
+        }
+        file << "\n";
+        {
+        std::ostringstream line;
+        line << "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q["
+             << qubit_number
+             << "];\ncreg c["
+             << qubit_number
+             << "];\n";
+        file << line.str();
+        }
+        
+        for(auto &gate:output) {
+            if (gate.id == -1) continue;
+            std::ostringstream line;
+            line << Gate_view[gate.type]
+                 << "q[" << gate.control << "]";
+            if (gate.type != H) {
+                line << ",q[" << gate.target << "]";
+            }
+            line << ";\n";
+            file << line.str();
+        }
+
+        file.close();
+        //std::cout << "circuit run time: " << max_decay << std::endl;
+    } else {
+        std::cerr << "Failed to open the file." << std::endl;
+    }
+}
 
 class Mapper {
     public:
@@ -33,23 +189,23 @@ class Mapper {
         vector<int> decay;
         vector<int> real_decay;
         int max_decay;
-        int free_time_delta; // = min(gate time)/2
         vector<Node*> front_layer;
         vector<Node*> extended_layer;
         vector<int> l2p_layout; //logical->physcial
         vector<int> p2l_layout;
-        //vector<Node*> logical_bit_now_node;
         vector<int> last_swap_pair;
         vector<vector<Gate*>> last_swap_gate;
-        std::deque<Gate> output;
+        std::deque<Gate> *output;
         bool routing_fail;
 
         Mapper(Quantum_chip *chip,
                Circuit *circuit,
-               vector<int> initial_layout)
+               vector<int> initial_layout,
+               std::deque<Gate> *output)
         {
             this->chip = chip;
             this->circuit = circuit;
+            this->output = output;
             if (initial_layout.size() != 0) {
                 this->l2p_layout = vector<int>(circuit->qubit_number, -1);
                 for(int i = 0; i<circuit->qubit_number; i++)
@@ -81,54 +237,23 @@ class Mapper {
             this->routing_fail = false;
         }
 
-        void dump_result(char * result_path) {
-            if (routing_fail) return;
-            // 获取文件所在的文件夹路径
-            std::filesystem::path dir = std::filesystem::path(result_path).parent_path();
+        void reload(
+            Circuit *circuit
+            ) {
+            this->circuit = circuit;
 
-            // 如果文件夹不存在，则创建文件夹
-            if (!std::filesystem::exists(dir)) {
-                std::filesystem::create_directories(dir);
-            }
-
-            // 以覆盖的方式写入文件
-            std::ofstream file(result_path, std::ios::out | std::ios::trunc);
-
-            for (size_t i = 0; i<circuit->left_h_gate_each_bit.size(); i++){
-                for (Gate *gate:circuit->left_h_gate_each_bit[i]) {
-                    output.push_back(Gate(H, gate->id, l2p_layout[gate->control],-1));
+            for (auto node:circuit->node_list) {
+                if (node->front_cnt == 0) {
+                    this->front_layer.push_back(node);
+                }                   
+                else if (node->layer == 1 ) {
+                    this->extended_layer.push_back(node);
                 }
             }
-
-            if (file.is_open()) {
-                {
-                std::ostringstream line;
-                line << "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q["
-                     << this->chip->qubit_number
-                     << "];\ncreg c["
-                     << this->chip->qubit_number
-                     << "];\n";
-                file << line.str();
-                }
-                
-                for(auto &gate:output) {
-                    if (gate.id == -1) continue;
-                    std::ostringstream line;
-                    line << Gate_view[gate.type]
-                         << "q[" << gate.control << "]";
-                    if (gate.type != H) {
-                        line << ",q[" << gate.target << "]";
-                    }
-                    line << ";\n";
-                    file << line.str();
-                }
-
-                file.close();
-                //std::cout << "circuit run time: " << max_decay << std::endl;
-            } else {
-                std::cerr << "Failed to open the file." << std::endl;
-            }
-        }        
+            this->last_swap_pair = vector<int>(chip->qubit_number, -1);
+            this->last_swap_gate = vector<vector<Gate*>>(chip->qubit_number);
+            this->routing_fail = false;
+        }
 
         vector<vector<Gate>> get_operations(vector<int> &key_qubit){
             //[bit][op]
@@ -196,8 +321,14 @@ class Mapper {
                 }
                 this->apply_comb(min_score_comb);
             }
-        }
 
+
+            for (size_t i = 0; i<circuit->left_h_gate_each_bit.size(); i++){
+                for (Gate *gate:circuit->left_h_gate_each_bit[i]) {
+                    output->push_back(Gate(H, gate->id, l2p_layout[gate->control],-1));
+                }
+            }
+        }
 
         void routing_group(vector<int> &key_qbit, vector<vector<Gate>> &ready_ops, vector<const Gate*> &min_score_comb) {
             static vector<int> bit_has_added(this->chip->qubit_number, 0);
@@ -455,9 +586,9 @@ class Mapper {
                 auto swap_gate = Gate(SWAP, 0, phy_q1, phy_q2);
                 this->last_swap_pair[phy_q1] = phy_q2;
                 this->last_swap_pair[phy_q2] = phy_q1;
-                output.push_back(std::move(swap_gate));
-                this->last_swap_gate[phy_q1].push_back(&output.back());
-                this->last_swap_gate[phy_q2].push_back(&output.back());
+                output->push_back(std::move(swap_gate));
+                this->last_swap_gate[phy_q1].push_back(&output->back());
+                this->last_swap_gate[phy_q2].push_back(&output->back());
                 
             }
             for (auto node:front_layer) {
@@ -498,7 +629,7 @@ class Mapper {
                 if (start_time + gate_run_time <= latest_end_time) {
                     start_time += gate_run_time;
                     //std::cout<<"h "<<phy_qubit<< "\t|| h "<<logical_qubit<<std::endl;
-                    output.push_back(Gate(tmp->type, tmp->id, phy_qubit, -1));
+                    output->push_back(Gate(tmp->type, tmp->id, phy_qubit, -1));
                 } else {
                     break;
                 }
@@ -531,7 +662,7 @@ class Mapper {
             
             node->has_done = true;
             //std::cout<<"CX "<<phy_q1<<" "<<phy_q2<<std::endl;
-            output.push_back(Gate(CX,node->cx_gate->id, phy_q1, phy_q2));
+            output->push_back(Gate(CX,node->cx_gate->id, phy_q1, phy_q2));
         }
 
         void update_front_layer() {
@@ -600,29 +731,47 @@ class Mapper {
 
 
 int main(int argc, char **argv) {
-    if (argc != 7) {
+    if (argc != 4) {
         return 1;
     }
     char *chip_path = argv[1];
     char *circuit_path = argv[2];
     char *result_path = argv[3];
-    DECAY_WEIGHT = std::stof(argv[4]);
-    SWAP_PRIOR_TH = std::stof(argv[5]);
-    NODE_PRIOR_TH = std::stof(argv[6]);
+    // DECAY_WEIGHT = std::stof(argv[4]);
+    // SWAP_PRIOR_TH = std::stof(argv[5]);
+    // NODE_PRIOR_TH = std::stof(argv[6]);
 
-    Circuit* c = new Circuit(circuit_path);
+    std::deque<Gate> output;
+    std::vector<double> run_time_list;
+    double run_time;
+    auto circuits = load_circuits(circuit_path);
+    Circuit *c = circuits[0];
     Quantum_chip *chip = new Quantum_chip("aaa", chip_path);
     vector<int> initial_layout(c->qubit_number);
     for (int i =0; i<c->qubit_number; i++)
         initial_layout[i] = i;
-    Mapper mp(chip, c, initial_layout);
+    Mapper mp(chip, c, initial_layout, &output);
+
     clock_t start_time = clock();
     mp.route();
     clock_t end_time = clock();
-    double run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
-    std::cout<<run_time<<std::endl;
-    mp.dump_result(result_path);
-    delete c;
+    run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
+    run_time_list.push_back(run_time);
+
+    for (int i = 1; i<circuits.size(); i++) {
+        mp.reload(circuits[i]);
+        clock_t start_time = clock();
+        mp.route();
+        clock_t end_time = clock();
+        run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
+        run_time_list.push_back(run_time);
+    }
+    std::cout<<std::endl;
+    std::cout<<result_path<<std::endl;
+    dump_result(result_path, output, chip->qubit_number, run_time_list);
+    for (Circuit *circuit:circuits) {
+        delete circuit;
+    }
     delete chip;
     return 0;
 }

@@ -21,7 +21,6 @@ float DECAY_WEIGHT = 1.0;
 float SINGLE_GROUP_TH = 0.25;
 bool opt_fidelity = false;
 
-
 std::vector<Circuit *> load_circuits(char *file_path) {
     std::ifstream file(file_path); // 打开文件
     if (!file.is_open()) {
@@ -204,7 +203,6 @@ class Mapper {
             this->chip = chip;
             this->circuit = circuit;
             this->output = output;
-            
             if (initial_layout.size() != 0) {
                 this->l2p_layout = vector<int>(circuit->qubit_number, -1);
                 for(int i = 0; i<circuit->qubit_number; i++)
@@ -291,7 +289,6 @@ class Mapper {
         void route() {
             this->update_front_layer();
             float routing_flag_rate = 0;// the range is (0,0.5]   0.5->group choose  0->single choose
-            
             while (this->front_layer.size() > 0) {
                 vector<int> key_qbit;
                 auto ready_ops = this->get_operations(key_qbit);     
