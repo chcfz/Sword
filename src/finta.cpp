@@ -306,7 +306,6 @@ class Mapper {
                 this->check_front_layer_change();
             }
 
-
             for (size_t i = 0; i<circuit->left_h_gate_each_bit.size(); i++){
                 for (Gate *gate:circuit->left_h_gate_each_bit[i]) {
                     output->push_back(Gate(H, gate->id, l2p_layout[gate->control],-1));
@@ -320,7 +319,6 @@ class Mapper {
             Gate *min_score_gate;
             float min_score = FLT_MAX;
             float tmp_score;
-
             int now_front_dist;
             int now_extend_dist;
             while (1)
@@ -359,7 +357,6 @@ class Mapper {
             int now_extend_dist = this->extend_dist(this->chip->dist);
             for(size_t i = 0; i<static_cast<size_t>(ready_ops.size()); i++) {
                 for(size_t j = 0; j<static_cast<size_t>(ready_ops[i].size()); j++){
-
                     tmp_score = this->score_single(&ready_ops[i][j], now_front_dist, now_extend_dist);
                     if (min_score>tmp_score) {
                         min_score = tmp_score;
@@ -368,7 +365,7 @@ class Mapper {
                 }
             }
             if (min_score_gate)
-                apply_swap(min_score_gate);
+               apply_swap(min_score_gate);
         }
 
         float score_fidelity(Gate* op) {
@@ -806,9 +803,6 @@ int main(int argc, char **argv) {
     std::deque<Gate> output;
     std::vector<double> run_time_list;
     double run_time;
-
-    //DECAY_WEIGHT = std::stof(argv[5]);
-
     auto circuits = load_circuits(circuit_path);
     Circuit *c = circuits[0];
     Quantum_chip *chip = new Quantum_chip("aaa", chip_path);
