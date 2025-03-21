@@ -9,7 +9,7 @@
 #include "quantum_chip.h"
 
 Quantum_chip::Quantum_chip(std::string name, char * file_path):
-    name(name), gate_id(std::unordered_map<std::string, int>()), min_cx(INT32_MAX), max_cx(0),max_T1(0), max_T2(0), min_h(INT32_MAX){
+    name(name), gate_id(std::unordered_map<std::string, int>()), min_cx(INT32_MAX), max_cx(0),max_T1(0){
     if (this->load(file_path) == 0) {
         this->calc_dist_m();
         this->neibors = std::vector<std::vector<int>>
@@ -265,8 +265,8 @@ void Quantum_chip::calc_dist_m() {
             this->max_cx = std::max(this->max_cx, this->coupling_map[i][j]);
             
         }
-        this->max_T1 = std::max(this->max_T1, this->qubit_T1[i]);
-        this->max_T2 = std::max(this->max_T2, this->qubit_T2[i]);
+        //this->max_T1 = std::max(this->max_T1, this->qubit_T1[i]);
+        //this->max_T2 = std::max(this->max_T2, this->qubit_T2[i]);
         //this->min_h = std::min(this->min_h, this->single_gate_time[i][0]);
     }
     

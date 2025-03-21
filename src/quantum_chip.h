@@ -26,7 +26,7 @@ class Quantum_chip
         std::vector<std::vector<int>> steps_dist;
         std::vector<std::vector<int>> fidelity_dist;
         std::vector<std::vector<int>> neibors;
-        int min_cx,max_cx,min_h,max_T1, max_T2;
+        int min_cx,max_cx,max_T1;
 
         std::vector<int> qubit_T1;
         std::vector<int> qubit_T2;

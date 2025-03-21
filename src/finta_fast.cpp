@@ -382,7 +382,7 @@ class Mapper {
         }
 
         float score_fidelity(Gate* op) {
-            static const float M_1_MAX_T1 = 1.0/(chip->max_T1);
+            //static const float M_1_MAX_T1 = 1.0/(chip->max_T1);
             int phy_q1,phy_q2;
             int part_max_decay = 0;
             phy_q1 = op->control;
@@ -428,65 +428,6 @@ class Mapper {
             }
         }
 
-        float score_group_fidelity(vector<const Gate*>& currentCombination) {
-            static const float M_1_MAX_T1_DELTA = 1.0/(chip->max_T1);
-            int phy_q1,phy_q2;
-            int tmp_max_end_decay = 0;
-            int part_max_decay = 0;
-            //int total_consume_fidelity = 0;
-            for (auto op:currentCombination) {
-                phy_q1 = op->control;
-                phy_q2 = op->target;
-                tmp_max_end_decay = std::max(this->decay[phy_q1], this->decay[phy_q2]);
-                swap(op);
-                tmp_max_end_decay += 3 * this->chip->coupling_map[phy_q1][phy_q2];
-                part_max_decay = std::max(part_max_decay, tmp_max_end_decay);
-                //total_consume_fidelity += 3 * this->chip->double_gate_fidelity[phy_q1][phy_q2];
-            }
-
-            int front_score = this->front_dist(this->chip->fidelity_dist);
-            int extend_score = this->extend_dist(this->chip->fidelity_dist);
-            //恢复
-            for (auto op:currentCombination) {
-                swap(op);
-            }
-            float rate = 1.0;
-            if (this->max_decay != 0) {
-                phy_q1 = currentCombination.back()->control;
-                phy_q2 = currentCombination.back()->target;
-                int max_qubit_decay = std::max(this->decay[phy_q1], this->decay[phy_q2]);
-                rate += DECAY_WEIGHT*max_qubit_decay/this->max_decay;
-            }
-            return  rate * (front_score + 0.1*extend_score);
-        }
-
-
-        float score_group(vector<const Gate*>& currentCombination) {
-            static const float M_1_MAX_CX_DELTA = 1.0/(chip->max_cx);
-            int phy_q1,phy_q2;
-            int tmp_max_end_decay = 0;
-            int part_max_decay = 0;
-            for (auto op:currentCombination) {
-                phy_q1 = op->control;
-                phy_q2 = op->target;
-                swap(op);
-            }
-
-            int front_score = this->front_dist(this->chip->dist);
-            int extend_score = this->extend_dist(this->chip->dist);
-            //恢复
-            for (auto op:currentCombination) {
-                swap(op);
-            }
-            float rate = 1.0;
-            if (this->max_decay != 0) {
-                phy_q1 = currentCombination.back()->control;
-                phy_q2 = currentCombination.back()->target;
-                int max_qubit_decay = std::max(this->decay[phy_q1], this->decay[phy_q2]);
-                rate += DECAY_WEIGHT*max_qubit_decay/this->max_decay;
-            }
-            return  rate * (front_score + 0.1*extend_score);
-        }
         
         int dist_change_after_swap(Gate* op, vector<int> &logical_qubit_in_layer_node_index, vector<Node*> &layer) { 
             int logical_q1 = this->p2l_layout[op->control];
@@ -833,7 +774,7 @@ int main(int argc, char **argv) {
     run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
     run_time_list.push_back(run_time);
 
-    for (int i = 1; i<circuits.size(); i++) {
+    for (size_t i = 1; i<circuits.size(); i++) {
         mp.reload(circuits[i]);
         clock_t start_time = clock();
         mp.route();

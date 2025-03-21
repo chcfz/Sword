@@ -313,85 +313,63 @@ class Mapper {
             }
         }
 
-        void parallel_routing_group(vector<int> &key_qbit, vector<vector<Gate>> &ready_ops) {
-            
-        }
-
         void routing_group(vector<int> &key_qbit, vector<vector<Gate>> &ready_ops) {
             static vector<int> bit_has_added(this->chip->qubit_number, 0);
             bit_has_added.assign(this->chip->qubit_number, 0);
-
-
-            while (true) {
-
-                // 调用并行化的函数
-                static vector<int> bit_has_added(this->chip->qubit_number, 0);
-                bit_has_added.assign(this->chip->qubit_number, 0);
-                Gate *min_score_gate = nullptr;
-                float min_score = FLT_MAX;
-                float tmp_score;
-
-                int now_front_dist = this->front_dist(this->chip->dist);
-                int now_extend_dist = this->extend_dist(this->chip->dist);
-
-                #pragma omp parallel for collapse(2) shared(ready_ops, bit_has_added, min_score_gate, min_score) private(tmp_score)
-                for(size_t i = 0; i < static_cast<size_t>(ready_ops.size()); i++) {
+            Gate *min_score_gate;
+            float min_score = FLT_MAX;
+            float tmp_score;
+            int now_front_dist;
+            int now_extend_dist;
+            while (1)
+            {
+                min_score_gate = nullptr;
+                now_front_dist = this->front_dist(this->chip->dist);
+                now_extend_dist = this->extend_dist(this->chip->dist);
+                for(size_t i = 0; i<static_cast<size_t>(ready_ops.size()); i++) {
                     if (bit_has_added[key_qbit[i]]) continue;
-                    for(size_t j = 0; j < static_cast<size_t>(ready_ops[i].size()); j++) {
+                    for(size_t j = 0; j<static_cast<size_t>(ready_ops[i].size()); j++){
                         if (bit_has_added[ready_ops[i][j].control] || bit_has_added[ready_ops[i][j].target]) continue;
+                        //min_score_comb.push_back(&ready_ops[i][j]);
                         tmp_score = this->score_single(&ready_ops[i][j], now_front_dist, now_extend_dist);
-                        #pragma omp critical
-                        {
-                            if (min_score > tmp_score) {
-                                min_score = tmp_score;
-                                min_score_gate = &ready_ops[i][j];
-                            }
+                        if (min_score>tmp_score) {
+                            min_score = tmp_score;
+                            //min_reduce_delta = tmp_delta;
+                            min_score_gate = &ready_ops[i][j];
                         }
+                        //min_score_comb.pop_back();
                     }
                 }
-
-                if (min_score_gate) {
-                    apply_swap(min_score_gate);
-                    bit_has_added[min_score_gate->control] = 1;
-                    bit_has_added[min_score_gate->target] = 1;
-                }
-
-                // 检查是否找到最小得分的门
-                if (min_score_gate == nullptr) break; // 如果没有找到，退出循环
+                if (!min_score_gate) break;
+                //min_score_comb.push_back(min_score_gate);
+                apply_swap(min_score_gate);
+                bit_has_added[min_score_gate->control] = 1;
+                bit_has_added[min_score_gate->target] = 1;
+                //break;
             }
         }
-
 
         void routing_single(vector<vector<Gate>> &ready_ops) {
             Gate *min_score_gate = nullptr;
             float min_score = FLT_MAX;
-
             float tmp_score;
             int now_front_dist = this->front_dist(this->chip->dist);
             int now_extend_dist = this->extend_dist(this->chip->dist);
-
-            #pragma omp parallel for collapse(2) shared(ready_ops, min_score_gate, min_score) private(tmp_score)
-            for(size_t i = 0; i < static_cast<size_t>(ready_ops.size()); i++) {
-                for(size_t j = 0; j < static_cast<size_t>(ready_ops[i].size()); j++) {
+            for(size_t i = 0; i<static_cast<size_t>(ready_ops.size()); i++) {
+                for(size_t j = 0; j<static_cast<size_t>(ready_ops[i].size()); j++){
                     tmp_score = this->score_single(&ready_ops[i][j], now_front_dist, now_extend_dist);
-                    #pragma omp critical
-                    {
-                        if (min_score > tmp_score) {
-                            min_score = tmp_score;
-                            min_score_gate = &ready_ops[i][j];
-                        }
+                    if (min_score>tmp_score) {
+                        min_score = tmp_score;
+                        min_score_gate = &ready_ops[i][j];
                     }
                 }
             }
-
-            if (min_score_gate) {
-                apply_swap(min_score_gate);
-            }
- 
+            if (min_score_gate)
+               apply_swap(min_score_gate);
         }
 
         float score_fidelity(Gate* op) {
-            static const float M_1_MAX_T1 = 1.0/(chip->max_T1);
+            //static const float M_1_MAX_T1 = 1.0/(chip->max_T1);
             int phy_q1,phy_q2;
             int part_max_decay = 0;
             phy_q1 = op->control;
@@ -437,65 +415,6 @@ class Mapper {
             }
         }
 
-        float score_group_fidelity(vector<const Gate*>& currentCombination) {
-            static const float M_1_MAX_T1_DELTA = 1.0/(chip->max_T1);
-            int phy_q1,phy_q2;
-            int tmp_max_end_decay = 0;
-            int part_max_decay = 0;
-            //int total_consume_fidelity = 0;
-            for (const auto* op : currentCombination) {
-                phy_q1 = op->control;
-                phy_q2 = op->target;
-                tmp_max_end_decay = std::max(this->decay[phy_q1], this->decay[phy_q2]);
-                swap(op);
-                tmp_max_end_decay += 3 * this->chip->coupling_map[phy_q1][phy_q2];
-                part_max_decay = std::max(part_max_decay, tmp_max_end_decay);
-                //total_consume_fidelity += 3 * this->chip->double_gate_fidelity[phy_q1][phy_q2];
-            }
-
-            int front_score = this->front_dist(this->chip->fidelity_dist);
-            int extend_score = this->extend_dist(this->chip->fidelity_dist);
-            //恢复
-            for (const auto* op : currentCombination) {
-                swap(op);
-            }
-            float rate = 1.0;
-            if (this->max_decay != 0) {
-                phy_q1 = currentCombination.back()->control;
-                phy_q2 = currentCombination.back()->target;
-                int max_qubit_decay = std::max(this->decay[phy_q1], this->decay[phy_q2]);
-                rate += DECAY_WEIGHT*max_qubit_decay/this->max_decay;
-            }
-            return  rate * (front_score + 0.1*extend_score);
-        }
-
-
-        float score_group(vector<const Gate*>& currentCombination) {
-            static const float M_1_MAX_CX_DELTA = 1.0/(chip->max_cx);
-            int phy_q1,phy_q2;
-            int tmp_max_end_decay = 0;
-            int part_max_decay = 0;
-            for (auto op:currentCombination) {
-                phy_q1 = op->control;
-                phy_q2 = op->target;
-                swap(op);
-            }
-
-            int front_score = this->front_dist(this->chip->dist);
-            int extend_score = this->extend_dist(this->chip->dist);
-            //恢复
-            for (auto op:currentCombination) {
-                swap(op);
-            }
-            float rate = 1.0;
-            if (this->max_decay != 0) {
-                phy_q1 = currentCombination.back()->control;
-                phy_q2 = currentCombination.back()->target;
-                int max_qubit_decay = std::max(this->decay[phy_q1], this->decay[phy_q2]);
-                rate += DECAY_WEIGHT*max_qubit_decay/this->max_decay;
-            }
-            return  rate * (front_score + 0.1*extend_score);
-        }
         
         int dist_change_after_swap(Gate* op, vector<int> &logical_qubit_in_layer_node_index, vector<Node*> &layer) { 
             int logical_q1 = this->p2l_layout[op->control];
@@ -832,21 +751,20 @@ int main(int argc, char **argv) {
     for (int i =0; i<c->qubit_number; i++)
         initial_layout[i] = i;
     Mapper mp(chip, c, initial_layout, &output);
-    double total_time = 0;
+
     clock_t start_time = clock();
     mp.route();
     clock_t end_time = clock();
     run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
     run_time_list.push_back(run_time);
 
-    for (int i = 1; i<circuits.size(); i++) {
+    for (size_t i = 1; i<circuits.size(); i++) {
         mp.reload(circuits[i]);
         clock_t start_time = clock();
         mp.route();
         clock_t end_time = clock();
         run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
         run_time_list.push_back(run_time);
-        total_time += run_time;
     }
     std::cout<<std::endl;
     std::cout<<result_path<<std::endl;
@@ -854,7 +772,6 @@ int main(int argc, char **argv) {
     for (Circuit *circuit:circuits) {
         delete circuit;
     }
-    std::cout<<"total time: "<<total_time<<std::endl;
     delete chip;
     return 0;
 }
