@@ -2,6 +2,7 @@
 #include <string.h>
 #include "quantum_chip.h"
 #include "circuit.h"
+#include "token_swap.cpp"
 #include <iterator>
 #include <unordered_set>
 #include <float.h>
@@ -757,13 +758,25 @@ int main(int argc, char **argv) {
     clock_t end_time = clock();
     run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
     run_time_list.push_back(run_time);
-
+    double token_swap_time = 0;
+    vector last_final_mapping = mp.l2p_layout;
     for (size_t i = 1; i<circuits.size(); i++) {
         mp.reload(circuits[i]);
         clock_t start_time = clock();
         mp.route();
         clock_t end_time = clock();
         run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
+        if (i % 2 == 1) {
+            //subcircuit
+            //token swap
+            auto swap_sequence = TS4(chip->coupling_map, mp.p2l_layout, last_final_mapping, &token_swap_time);
+            for (auto swap:swap_sequence) {
+                auto gate = Gate(SWAP, 0, swap[0], swap[1]);
+                mp.apply_swap(&gate);
+            }
+            run_time += token_swap_time;
+        }
+        last_final_mapping = mp.l2p_layout;
         run_time_list.push_back(run_time);
     }
     std::cout<<std::endl;
