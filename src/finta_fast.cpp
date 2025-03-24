@@ -2,6 +2,7 @@
 #include <string.h>
 #include "quantum_chip.h"
 #include "circuit.h"
+#include "token_swap.cpp"
 #include <iterator>
 #include <unordered_set>
 #include <float.h>
@@ -189,6 +190,8 @@ class Mapper {
         vector<int> decay;
         vector<int> real_decay;
         int max_decay;
+        int min_decay;
+        int min_decay_qubit;
         vector<Node*> front_layer;
         vector<Node*> extended_layer;
         vector<int> l2p_layout; //logical->physcial
@@ -234,6 +237,8 @@ class Mapper {
             this->decay = vector<int>(chip->qubit_number ,0);
             this->real_decay = vector<int>(chip->qubit_number, 0);
             this->max_decay = 0;
+            this->min_decay = 0;
+            this->min_decay_qubit = 0;
             this->last_swap_pair = vector<int>(chip->qubit_number, -1);
             this->last_swap_gate = vector<vector<Gate*>>(chip->qubit_number);
             this->logical_qubit_in_front_layer_node_index = vector<int>(circuit->qubit_number, -1);
@@ -396,7 +401,10 @@ class Mapper {
             swap(op);
             float rate = 1.0;
             if (this->max_decay != 0) {
-                rate += DECAY_WEIGHT*part_max_decay/this->max_decay;
+                if (min_decay < max_decay)
+                    rate += DECAY_WEIGHT*(part_max_decay-min_decay)/(max_decay-min_decay);
+                else
+                    rate += DECAY_WEIGHT*part_max_decay/max_decay;
             }
             return  rate * (front_score + 0.1*extend_score);
         }
@@ -511,6 +519,12 @@ class Mapper {
             this->decay[phy_q1] = two_bit_max_decay + 3*this->chip->coupling_map[phy_q1][phy_q2];
             this->decay[phy_q2] = this->decay[phy_q1];
             this->max_decay = std::max(this->decay[phy_q1], this->max_decay);
+            if (phy_q1 == min_decay_qubit || phy_q2 == min_decay_qubit) {
+                for (size_t i = 0; i<this->decay.size(); i++) {
+                    if (decay[i] < decay[min_decay_qubit]) min_decay_qubit = i;
+                }
+                min_decay = decay[min_decay_qubit];
+            }
             swap(gate);
             if (last_swap_pair[phy_q1] == phy_q2 && last_swap_pair[phy_q2] == phy_q1) {
                 last_swap_gate[phy_q1].back()->id = -1;
@@ -533,22 +547,21 @@ class Mapper {
                 } else {
                     last_swap_pair[phy_q2] = -1;
                 }
+            } else {
+                two_bit_max_decay = std::max(this->real_decay[phy_q1], this->real_decay[phy_q2]);
+                this->real_decay[phy_q1] = two_bit_max_decay + 3*this->chip->coupling_map[phy_q1][phy_q2];
+                this->real_decay[phy_q2] = this->real_decay[phy_q1];
+                
+                run_H_gate_before_op(gate->control, two_bit_max_decay);
+                run_H_gate_before_op(gate->target, two_bit_max_decay);
+
+                auto swap_gate = Gate(SWAP, 0, phy_q1, phy_q2);
+                this->last_swap_pair[phy_q1] = phy_q2;
+                this->last_swap_pair[phy_q2] = phy_q1;
+                output->push_back(std::move(swap_gate));
+                this->last_swap_gate[phy_q1].push_back(&output->back());
+                this->last_swap_gate[phy_q2].push_back(&output->back());
             }
-
-
-            two_bit_max_decay = std::max(this->real_decay[phy_q1], this->real_decay[phy_q2]);
-            this->real_decay[phy_q1] = two_bit_max_decay + 3*this->chip->coupling_map[phy_q1][phy_q2];
-            this->real_decay[phy_q2] = this->real_decay[phy_q1];
-            
-            run_H_gate_before_op(gate->control, two_bit_max_decay);
-            run_H_gate_before_op(gate->target, two_bit_max_decay);
-
-            auto swap_gate = Gate(SWAP, 0, phy_q1, phy_q2);
-            this->last_swap_pair[phy_q1] = phy_q2;
-            this->last_swap_pair[phy_q2] = phy_q1;
-            output->push_back(std::move(swap_gate));
-            this->last_swap_gate[phy_q1].push_back(&output->back());
-            this->last_swap_gate[phy_q2].push_back(&output->back());
         }
 
         bool check_front_layer_change() {
@@ -566,71 +579,6 @@ class Mapper {
             return front_layer_change;
         }
 
-        bool apply_comb(vector<const Gate*>& comb) {
-            bool front_layer_change = false;
-            int phy_q1,phy_q2;
-            int two_bit_max_decay;
-            for (auto gate:comb) {               
-                phy_q1 = gate->control;
-                phy_q2 = gate->target;
-
-                two_bit_max_decay = std::max(this->decay[phy_q1], this->decay[phy_q2]);
-                this->decay[phy_q1] = two_bit_max_decay + 3*this->chip->coupling_map[phy_q1][phy_q2];
-                this->decay[phy_q2] = this->decay[phy_q1];
-                this->max_decay = std::max(this->decay[phy_q1], this->max_decay);
-                swap(gate);
-                if (last_swap_pair[phy_q1] == phy_q2 && last_swap_pair[phy_q2] == phy_q1) {
-                    last_swap_gate[phy_q1].back()->id = -1;
-                    last_swap_gate[phy_q1].pop_back();
-                    last_swap_gate[phy_q2].pop_back();
-
-                    real_decay[phy_q1] -= 3*chip->coupling_map[phy_q1][phy_q2];
-                    real_decay[phy_q2] = real_decay[phy_q1];
-
-                    Gate* swap_gate;
-                    if (! last_swap_gate[phy_q1].empty()) {
-                        swap_gate = last_swap_gate[phy_q1].back();
-                        last_swap_pair[phy_q1] = phy_q1 != swap_gate->control?swap_gate->control:swap_gate->target;
-                    } else {
-                        last_swap_pair[phy_q1] = -1;
-                    }
-                    if (! last_swap_gate[phy_q2].empty()) {
-                        swap_gate = last_swap_gate[phy_q2].back();
-                        last_swap_pair[phy_q2] = phy_q2 != swap_gate->control?swap_gate->control:swap_gate->target;
-                    } else {
-                        last_swap_pair[phy_q2] = -1;
-                    }
-                    continue;
-                }
-    
-
-                
-                two_bit_max_decay = std::max(this->real_decay[phy_q1], this->real_decay[phy_q2]);
-                this->real_decay[phy_q1] = two_bit_max_decay + 3*this->chip->coupling_map[phy_q1][phy_q2];
-                this->real_decay[phy_q2] = this->real_decay[phy_q1];
-                
-                run_H_gate_before_op(gate->control, two_bit_max_decay);
-                run_H_gate_before_op(gate->target, two_bit_max_decay);
-
-                auto swap_gate = Gate(SWAP, 0, phy_q1, phy_q2);
-                this->last_swap_pair[phy_q1] = phy_q2;
-                this->last_swap_pair[phy_q2] = phy_q1;
-                output->push_back(std::move(swap_gate));
-                this->last_swap_gate[phy_q1].push_back(&output->back());
-                this->last_swap_gate[phy_q2].push_back(&output->back());
-                
-            }
-            for (auto node:front_layer) {
-                phy_q1 = l2p_layout[node->cx_gate->control];
-                phy_q2 = l2p_layout[node->cx_gate->target];
-                if (chip->coupling_map[phy_q1][phy_q2]) {
-                    front_layer_change = true;
-                    break;
-                }
-            }
-            if (front_layer_change) this->update_front_layer();
-            return front_layer_change;
-        }
 
         int run_H_gate_before_op(int phy_qubit, int latest_end_time) {
             int logical_qubit = this->p2l_layout[phy_qubit];
@@ -737,10 +685,13 @@ class Mapper {
         
             //同步decay 与real_decay;
             this->max_decay = 0;
+            this->min_decay_qubit = 0;
             for(int i = 0; i<this->chip->qubit_number; i++) {
                 decay[i] = real_decay[i];
                 max_decay = std::max(max_decay, decay[i]);
+                if (decay[min_decay_qubit] > decay[i]) min_decay_qubit = i;
             }
+            min_decay = decay[min_decay_qubit];
         }
         
 
@@ -748,12 +699,13 @@ class Mapper {
 
 
 int main(int argc, char **argv) {
-    if (argc != 4) {
+    if (argc < 5) {
         return 1;
     }
     char *chip_path = argv[1];
     char *circuit_path = argv[2];
     char *result_path = argv[3];
+    char *token_swap_mode = argv[4];
     // SWAP_PRIOR_TH = std::stof(argv[5]);
     // NODE_PRIOR_TH = std::stof(argv[6]);
 
@@ -773,13 +725,25 @@ int main(int argc, char **argv) {
     clock_t end_time = clock();
     run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
     run_time_list.push_back(run_time);
-
+    double token_swap_time = 0;
+    vector last_final_mapping = mp.l2p_layout;
     for (size_t i = 1; i<circuits.size(); i++) {
         mp.reload(circuits[i]);
         clock_t start_time = clock();
         mp.route();
         clock_t end_time = clock();
         run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
+        if (token_swap_mode[0] == 't' && i % 2 == 1) {
+            //subcircuit
+            //token swap
+            auto swap_sequence = TS4(chip->coupling_map, mp.p2l_layout, last_final_mapping, &token_swap_time);
+            for (auto swap:swap_sequence) {
+                auto gate = Gate(SWAP, 0, swap[0], swap[1]);
+                mp.apply_swap(&gate);
+            }
+            run_time += token_swap_time;
+        }
+        last_final_mapping = mp.l2p_layout;
         run_time_list.push_back(run_time);
     }
     std::cout<<std::endl;

@@ -12,11 +12,11 @@ SRCS = $(SRC_DIR)/finta.cpp $(SRC_DIR)/finta_fast.cpp $(SRC_DIR)/quantum_chip.cp
 OBJS = $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(SRCS))
 
 # 定义最终的可执行文件名
-MAIN_TARGET = $(BIN_DIR)/finta
+FINTA = $(BIN_DIR)/finta
 FINTA_FAST = $(BIN_DIR)/finta_fast
 
 # 默认目标
-all: $(MAIN_TARGET) $(K_TREE_MAIN_TARGET)
+all: $(FINTA) $(FINTA_FAST)
 
 # 编译规则：将每个 .cpp 文件编译成对应的 .o 文件
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
@@ -27,7 +27,7 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 # 链接规则：将所有的 .o 文件链接成最终的可执行文件
-$(MAIN_TARGET): $(BUILD_DIR)/finta.o $(BUILD_DIR)/quantum_chip.o $(BUILD_DIR)/circuit.o | $(BIN_DIR)
+$(FINTA): $(BUILD_DIR)/finta.o $(BUILD_DIR)/quantum_chip.o $(BUILD_DIR)/circuit.o | $(BIN_DIR)
 	$(CXX) $(BUILD_DIR)/finta.o $(BUILD_DIR)/quantum_chip.o $(BUILD_DIR)/circuit.o -o $@
 
 $(FINTA_FAST): $(BUILD_DIR)/finta_fast.o $(BUILD_DIR)/quantum_chip.o $(BUILD_DIR)/circuit.o | $(BIN_DIR)
