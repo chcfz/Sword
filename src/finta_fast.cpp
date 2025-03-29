@@ -280,9 +280,6 @@ class Mapper {
                 if (tmp_ops.size()) {
 
                     std::sort(tmp_ops.begin(), tmp_ops.end(), [this, pair_phy_bit](Gate &i, Gate &j) {
-                        if (opt_fidelity) {
-                            return this->chip->fidelity_dist[i.target][pair_phy_bit] < this->chip->fidelity_dist[j.target][pair_phy_bit];
-                        }
                         return this->chip->dist[i.target][pair_phy_bit] < this->chip->dist[j.target][pair_phy_bit];
                     });
 

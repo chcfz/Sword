@@ -20,7 +20,8 @@
 //const static int LOOK_AHEAD_DEPTH = 10;
 float DECAY_WEIGHT = 1.0;
 float SINGLE_GROUP_TH = 0.25;
-bool opt_fidelity = false;
+float SWAP_PRIOR_TH = 0.4;
+float NODE_PRIOR_TH = 0.5;
 
 std::vector<Circuit *> load_circuits(char *file_path) {
     std::ifstream file(file_path); // 打开文件
@@ -295,6 +296,47 @@ class Mapper {
             
         }
 
+        vector<vector<Gate>> get_operations_sort(vector<int> &key_qubit){
+            //[bit][op]
+            vector<vector<Gate>> operations;
+            vector<int> has_process(this->chip->qubit_number, 0);
+
+            auto get_swaps = [&](vector<Gate> &tmp_ops, int phy_bit, int pair_phy_bit) {
+                for (int neib:this->chip->neibors[phy_bit]) {
+                    if (has_process[neib])
+                        continue;
+                    tmp_ops.push_back(Gate(SWAP, 0, phy_bit, neib));
+                }
+                has_process[phy_bit] = 1;
+                                
+                if (tmp_ops.size()) {
+
+                    std::sort(tmp_ops.begin(), tmp_ops.end(), [this, pair_phy_bit](Gate &i, Gate &j) {
+                        return this->chip->dist[i.target][pair_phy_bit] < this->chip->dist[j.target][pair_phy_bit];
+                    });
+
+                    operations.push_back(std::move(tmp_ops));
+                    key_qubit.push_back(phy_bit);
+                }
+
+            };
+            int to_check_node_cnt = int(this->front_layer.size()*NODE_PRIOR_TH+1);
+            Node* node;
+            for (int i = 0; i<to_check_node_cnt; i++) {
+                node = this->front_layer[i];
+                int phy_bit_ctl = this->l2p_layout[node->cx_gate->control];
+                int phy_bit_tgt = this->l2p_layout[node->cx_gate->target];
+                
+                vector<Gate> tmp_ops1,tmp_ops2;
+                //判断是否可以执行该CX
+                get_swaps(tmp_ops1, phy_bit_ctl, phy_bit_tgt);
+                get_swaps(tmp_ops2, phy_bit_tgt, phy_bit_ctl);
+                
+            }
+            return operations;
+            
+        }
+
         void route() {
             this->update_front_layer();
             float routing_flag_rate = 0;// the range is (0,0.5]   0.5->group choose  0->single choose
@@ -373,25 +415,85 @@ class Mapper {
                apply_swap(min_score_gate);
         }
 
-        float score_fidelity(Gate* op) {
-            //static const float M_1_MAX_T1 = 1.0/(chip->max_T1);
-            int phy_q1,phy_q2;
-            int part_max_decay = 0;
-            phy_q1 = op->control;
-            phy_q2 = op->target;
-            part_max_decay = std::max(this->decay[phy_q1], this->decay[phy_q2]);
-            swap(op);
-            //total_consume_time += 3 * this->chip->coupling_map[phy_q1][phy_q2];
-            int front_score = this->front_dist(this->chip->fidelity_dist);
-            int extend_score = this->extend_dist(this->chip->fidelity_dist);
-            //恢复
-            swap(op);
-            float rate = 1.0;
-            if (this->max_decay != 0) {
-                rate += DECAY_WEIGHT*part_max_decay/this->max_decay;
+        void route_fast() {
+            this->update_front_layer();
+            float routing_flag_rate = 0;// the range is (0,0.5]   0.5->group choose  0->single choose
+            while (this->front_layer.size() > 0) {
+                vector<int> key_qbit;
+                auto ready_ops = this->get_operations_sort(key_qbit);     
+                routing_flag_rate = 1.0*this->front_layer.size()/this->circuit->qubit_number;
+                //vector<const Gate*> min_score_comb;
+                if (routing_flag_rate > SINGLE_GROUP_TH)
+                    this->routing_group_fast(key_qbit, ready_ops);
+                else
+                    this->routing_single_fast(ready_ops);
+                //this->apply_comb(min_score_comb);
+                this->check_front_layer_change();
             }
-            return  rate * (front_score + 0.1*extend_score);
+
+            for (size_t i = 0; i<circuit->left_h_gate_each_bit.size(); i++){
+                for (Gate *gate:circuit->left_h_gate_each_bit[i]) {
+                    output->push_back(Gate(H, gate->id, l2p_layout[gate->control],-1));
+                }
+            }
         }
+
+        void routing_group_fast(vector<int> &key_qbit, vector<vector<Gate>> &ready_ops) {
+            static vector<int> bit_has_added(this->chip->qubit_number, 0);
+            bit_has_added.assign(this->chip->qubit_number, 0);
+            Gate *min_score_gate;
+            float min_score = FLT_MAX;
+            float tmp_score;
+            int now_front_dist;
+            int now_extend_dist;
+            while (1)
+            {
+                min_score_gate = nullptr;
+                now_front_dist = this->front_dist(this->chip->dist);
+                now_extend_dist = this->extend_dist(this->chip->dist);
+                for(size_t i = 0; i<static_cast<size_t>(ready_ops.size()); i++) {
+                    if (bit_has_added[key_qbit[i]]) continue;
+                    for(size_t j = 0; j<static_cast<size_t>(ready_ops[i].size()*SWAP_PRIOR_TH+1); j++){
+                        if (bit_has_added[ready_ops[i][j].control] || bit_has_added[ready_ops[i][j].target]) continue;
+                        //min_score_comb.push_back(&ready_ops[i][j]);
+                        tmp_score = this->score_single(&ready_ops[i][j], now_front_dist, now_extend_dist);
+                        if (min_score>tmp_score) {
+                            min_score = tmp_score;
+                            //min_reduce_delta = tmp_delta;
+                            min_score_gate = &ready_ops[i][j];
+                        }
+                        //min_score_comb.pop_back();
+                    }
+                }
+                if (!min_score_gate) break;
+                //min_score_comb.push_back(min_score_gate);
+                apply_swap(min_score_gate);
+                bit_has_added[min_score_gate->control] = 1;
+                bit_has_added[min_score_gate->target] = 1;
+                //break;
+            }
+        }
+
+        void routing_single_fast(vector<vector<Gate>> &ready_ops) {
+            Gate *min_score_gate = nullptr;
+            float min_score = FLT_MAX;
+            float tmp_score;
+            int now_front_dist = this->front_dist(this->chip->dist);
+            int now_extend_dist = this->extend_dist(this->chip->dist);
+            for(size_t i = 0; i<static_cast<size_t>(ready_ops.size()); i++) {
+                for(size_t j = 0; j<static_cast<size_t>(ready_ops[i].size()*SWAP_PRIOR_TH+1); j++){
+                    tmp_score = this->score_single(&ready_ops[i][j], now_front_dist, now_extend_dist);
+                    if (min_score>tmp_score) {
+                        min_score = tmp_score;
+                        min_score_gate = &ready_ops[i][j];
+                    }
+                }
+            }
+            if (min_score_gate)
+               apply_swap(min_score_gate);
+        }
+
+
 
         float score_single(Gate* op, int now_front_dist, int now_extend_dist) {
             int phy_q1,phy_q2;
@@ -690,7 +792,7 @@ int main(int argc, char **argv) {
     char *chip_path = argv[1];
     char *circuit_path = argv[2];
     char *result_path = argv[3];
-    char *token_swap_mode = argv[4];
+    char *route_mode = argv[4]; // online(fast)  offline(normal)    -->  'f',  'n'
     std::deque<Gate> output;
     std::vector<double> run_time_list;
     double run_time;
@@ -709,23 +811,47 @@ int main(int argc, char **argv) {
     run_time_list.push_back(run_time);
     double token_swap_time = 0;
     vector last_final_mapping = mp.l2p_layout;
+
+    void (Mapper::*subcircuit_route_method)();
+    if (route_mode[0] == 'f') {
+        subcircuit_route_method = &Mapper::route_fast;
+    }
+    else {
+        subcircuit_route_method = &Mapper::route;
+    }
+
+
     for (size_t i = 1; i<circuits.size(); i++) {
         mp.reload(circuits[i]);
-        clock_t start_time = clock();
-        mp.route();
-        clock_t end_time = clock();
-        run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
-        if (token_swap_mode[0] == 't' && i % 2 == 1) {
+        if (i % 2 == 0) {
+            clock_t start_time = clock();
+            mp.route();
+            clock_t end_time = clock();
+            run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
+        }
+        else {
             //subcircuit
             //token swap
+            clock_t start_time = clock();
+            (mp.*subcircuit_route_method)();
+            clock_t end_time = clock();
+            run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
             auto swap_sequence = TS4(chip->coupling_map, mp.p2l_layout, last_final_mapping, &token_swap_time);
             for (auto swap:swap_sequence) {
                 auto gate = Gate(SWAP, 0, swap[0], swap[1]);
                 mp.apply_swap(&gate);
             }
             run_time += token_swap_time;
+            //check ts is correct
+            // for (size_t i = 0; i<mp.p2l_layout.size(); i++) {
+            //     if (mp.p2l_layout[i] != last_final_mapping[i]) {
+            //         std::cout<<"ts is not correct"<<std::endl;
+            //         exit(0);
+            //     }
+            // }
         }
-        last_final_mapping = mp.l2p_layout;
+        
+        last_final_mapping = mp.p2l_layout;
         run_time_list.push_back(run_time);
     }
     std::cout<<std::endl;
