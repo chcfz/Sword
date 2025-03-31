@@ -22,7 +22,6 @@ float DECAY_WEIGHT = 1.0;
 float SINGLE_GROUP_TH = 0.25;
 float SWAP_PRIOR_TH = 0.4;
 float NODE_PRIOR_TH = 0.5;
-
 std::vector<Circuit *> load_circuits(char *file_path) {
     std::ifstream file(file_path); // 打开文件
     if (!file.is_open()) {
@@ -437,6 +436,28 @@ class Mapper {
                 }
             }
         }
+        float score_single(Gate* op, int now_front_dist, int now_extend_dist) {
+            int phy_q1,phy_q2;
+            int part_max_decay = 0;
+            phy_q1 = op->control;
+            phy_q2 = op->target;
+            part_max_decay = std::max(this->decay[phy_q1], this->decay[phy_q2]);
+            
+            int front_score = now_front_dist + this->dist_change_after_swap(op, logical_qubit_in_front_layer_node_index, front_layer);
+            int extend_score = now_extend_dist + this->dist_change_after_swap(op, logical_qubit_in_extended_layer_node_index, extended_layer);
+            float rate = 1.0;
+            if (this->max_decay != 0) {
+                if (min_decay < max_decay)
+                    rate += DECAY_WEIGHT*(part_max_decay-min_decay)/(max_decay-min_decay);
+                else
+                    rate += DECAY_WEIGHT*part_max_decay/max_decay;
+            }
+            if (extended_layer.size() == 0) {
+                return  rate * (front_score/front_layer.size());
+            } else {
+                return  rate * (front_score/front_layer.size() + 0.1*extend_score/extended_layer.size());
+            }
+        }
 
         void routing_group_fast(vector<int> &key_qbit, vector<vector<Gate>> &ready_ops) {
             static vector<int> bit_has_added(this->chip->qubit_number, 0);
@@ -456,7 +477,7 @@ class Mapper {
                     for(size_t j = 0; j<static_cast<size_t>(ready_ops[i].size()*SWAP_PRIOR_TH+1); j++){
                         if (bit_has_added[ready_ops[i][j].control] || bit_has_added[ready_ops[i][j].target]) continue;
                         //min_score_comb.push_back(&ready_ops[i][j]);
-                        tmp_score = this->score_single(&ready_ops[i][j], now_front_dist, now_extend_dist);
+                        tmp_score = this->score_single_fast(&ready_ops[i][j], now_front_dist, now_extend_dist);
                         if (min_score>tmp_score) {
                             min_score = tmp_score;
                             //min_reduce_delta = tmp_delta;
@@ -482,7 +503,7 @@ class Mapper {
             int now_extend_dist = this->extend_dist(this->chip->dist);
             for(size_t i = 0; i<static_cast<size_t>(ready_ops.size()); i++) {
                 for(size_t j = 0; j<static_cast<size_t>(ready_ops[i].size()*SWAP_PRIOR_TH+1); j++){
-                    tmp_score = this->score_single(&ready_ops[i][j], now_front_dist, now_extend_dist);
+                    tmp_score = this->score_single_fast(&ready_ops[i][j], now_front_dist, now_extend_dist);
                     if (min_score>tmp_score) {
                         min_score = tmp_score;
                         min_score_gate = &ready_ops[i][j];
@@ -493,9 +514,7 @@ class Mapper {
                apply_swap(min_score_gate);
         }
 
-
-
-        float score_single(Gate* op, int now_front_dist, int now_extend_dist) {
+        float score_single_fast(Gate* op, int now_front_dist, int now_extend_dist) {
             int phy_q1,phy_q2;
             int part_max_decay = 0;
             phy_q1 = op->control;
@@ -507,9 +526,9 @@ class Mapper {
             float rate = 1.0;
             if (this->max_decay != 0) {
                 if (min_decay < max_decay)
-                    rate += DECAY_WEIGHT*(part_max_decay-min_decay)/(max_decay-min_decay);
+                    rate += 0.1*(part_max_decay-min_decay)/(max_decay-min_decay);
                 else
-                    rate += DECAY_WEIGHT*part_max_decay/max_decay;
+                    rate += 0.1*part_max_decay/max_decay;
             }
             if (extended_layer.size() == 0) {
                 return  rate * (front_score/front_layer.size());
@@ -517,7 +536,6 @@ class Mapper {
                 return  rate * (front_score/front_layer.size() + 0.1*extend_score/extended_layer.size());
             }
         }
-
         
         int dist_change_after_swap(Gate* op, vector<int> &logical_qubit_in_layer_node_index, vector<Node*> &layer) { 
             int logical_q1 = this->p2l_layout[op->control];
@@ -601,12 +619,13 @@ class Mapper {
             this->decay[phy_q1] = two_bit_max_decay + 3*this->chip->coupling_map[phy_q1][phy_q2];
             this->decay[phy_q2] = this->decay[phy_q1];
             this->max_decay = std::max(this->decay[phy_q1], this->max_decay);
-            if (phy_q1 == min_decay_qubit || phy_q2 == min_decay_qubit) {
-                for (size_t i = 0; i<this->decay.size(); i++) {
-                    if (decay[i] < decay[min_decay_qubit]) min_decay_qubit = i;
-                }
-                min_decay = decay[min_decay_qubit];
-            }
+            // if (phy_q1 == min_decay_qubit || phy_q2 == min_decay_qubit) {
+            //     for (size_t i = 0; i<this->decay.size(); i++) {
+            //         if (decay[i] < decay[min_decay_qubit]) min_decay_qubit = i;
+            //     }
+            //     min_decay = decay[min_decay_qubit];
+            // }
+            
             swap(gate);
             if (last_swap_pair[phy_q1] == phy_q2 && last_swap_pair[phy_q2] == phy_q1) {
                 last_swap_gate[phy_q1].back()->id = -1;
