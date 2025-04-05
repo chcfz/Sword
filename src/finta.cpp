@@ -16,12 +16,47 @@
 #define M_E 2.718281828459045
 #include <cmath>
 #include <regex>
+#include <queue>
 //const static float EXTEND_RATE = 0.5;
 //const static int LOOK_AHEAD_DEPTH = 10;
 float DECAY_WEIGHT = 1.0;
+float DECAY_WEIGHT_FAST = 0.1;
 float SINGLE_GROUP_TH = 0.25;
 float SWAP_PRIOR_TH = 0.4;
-float NODE_PRIOR_TH = 0.5;
+float NODE_PRIOR_TH = 0.2;
+int K = 10;
+int NEAREND_LAYER = 10;
+int ROUTETOKEN_DELTA = 1;
+
+class TopKSmallest {
+public:
+    int k;
+    std::priority_queue<Gate*> max_heap;  // 最大堆，堆顶是最大的元素
+    TopKSmallest(int k) : k(k) {}
+
+    // 插入数据，仅维护前K小的元素
+    void add(Gate* gate) {
+        if (max_heap.size() < k) {
+            max_heap.push(gate);
+        } else if (gate->score < max_heap.top()->score) {
+            max_heap.pop();      // 移除最大的元素
+            max_heap.push(gate);  // 插入更小的元素
+        }
+    }
+
+    std::vector<Gate*> get() {
+        std::vector<Gate*> result;
+        while (!max_heap.empty()) {
+            result.push_back(max_heap.top());
+            max_heap.pop();
+        }
+        std::reverse(result.begin(), result.end());
+        return result;
+    }
+};
+
+
+
 std::vector<Circuit *> load_circuits(char *file_path) {
     std::ifstream file(file_path); // 打开文件
     if (!file.is_open()) {
@@ -129,11 +164,14 @@ std::vector<Circuit *> load_circuits(char *file_path) {
     } while (std::getline(file, line));
     circuit->left_h_gate_each_bit.swap(tmp_h_gate_list);
     circuits.push_back(circuit);
+    for (auto c:circuits) {
+        c->get_depth();
+    }
     file.close(); // 关闭文件
     return circuits;
 }
 
-void dump_result(char * result_path, std::deque<Gate> &output, int qubit_number, std::vector<double> run_time_list) {
+void dump_result(char * result_path, std::deque<Gate> &output, int qubit_number, std::vector<double> run_time_list, std::vector<int> max_decay_list) {
     // 获取文件所在的文件夹路径
     std::filesystem::path dir = std::filesystem::path(result_path).parent_path();
 
@@ -149,6 +187,11 @@ void dump_result(char * result_path, std::deque<Gate> &output, int qubit_number,
         file << "//";
         for (double run_time:run_time_list) {
             file << run_time << " ";
+        }
+        file << "\n";
+        file << "//";
+        for (int max_decay:max_decay_list) {
+            file << max_decay << " ";
         }
         file << "\n";
         {
@@ -320,6 +363,15 @@ class Mapper {
 
             };
             int to_check_node_cnt = int(this->front_layer.size()*NODE_PRIOR_TH+1);
+
+            std::sort(this->front_layer.begin(), this->front_layer.end(), [this](Node* a, Node* b) {
+                return (this->logical_qubit_in_extended_layer_node_index[a->cx_gate->control] != -1 +
+                       this->logical_qubit_in_extended_layer_node_index[a->cx_gate->target] != -1)
+                       >
+                       (this->logical_qubit_in_front_layer_node_index[b->cx_gate->control] != -1 +
+                       this->logical_qubit_in_front_layer_node_index[b->cx_gate->target] != -1);
+            });
+
             Node* node;
             for (int i = 0; i<to_check_node_cnt; i++) {
                 node = this->front_layer[i];
@@ -330,6 +382,63 @@ class Mapper {
                 //判断是否可以执行该CX
                 get_swaps(tmp_ops1, phy_bit_ctl, phy_bit_tgt);
                 get_swaps(tmp_ops2, phy_bit_tgt, phy_bit_ctl);
+                
+            }
+            return operations;
+            
+        }
+
+        vector<vector<Gate>> get_operations_sort_token(vector<int> &key_qubit, const vector<int> &target_l2p){
+            //[bit][op]
+            vector<vector<Gate>> operations;
+            vector<int> has_process(this->chip->qubit_number, 0);
+
+            auto get_swaps = [&](vector<Gate> &tmp_ops, int phy_bit) {
+                for (int neib:this->chip->neibors[phy_bit]) {
+                    if (has_process[neib])
+                        continue;
+                    tmp_ops.push_back(Gate(SWAP, 0, phy_bit, neib));
+                }
+                has_process[phy_bit] = 1;
+                                
+                if (tmp_ops.size()) {
+
+                    std::sort(tmp_ops.begin(), tmp_ops.end(), [this, target_l2p](Gate &i, Gate &j) {
+                        int phy1 = i.control;
+                        int phy2 = i.target;
+                        int logical_q1 = this->p2l_layout[phy1];
+                        int logical_q2 = this->p2l_layout[phy2];
+                        int lq1_target_phyq = target_l2p[logical_q1];
+                        int lq2_target_phyq = target_l2p[logical_q2];
+                        int delta_dist_i = this->chip->dist[lq1_target_phyq][phy2] - this->chip->dist[lq1_target_phyq][phy1]
+                                    +this->chip->dist[lq2_target_phyq][phy1] - this->chip->dist[lq2_target_phyq][phy2];
+                        phy1 = j.control;
+                        phy2 = j.target;
+                        logical_q1 = this->p2l_layout[phy1];
+                        logical_q2 = this->p2l_layout[phy2];
+                        lq1_target_phyq = target_l2p[logical_q1];
+                        lq2_target_phyq = target_l2p[logical_q2];
+                        int delta_dist_j = this->chip->dist[lq1_target_phyq][phy2] - this->chip->dist[lq1_target_phyq][phy1]
+                                    +this->chip->dist[lq2_target_phyq][phy1] - this->chip->dist[lq2_target_phyq][phy2];
+                        return delta_dist_i < delta_dist_j;
+                    });
+
+                    operations.push_back(std::move(tmp_ops));
+                    key_qubit.push_back(phy_bit);
+                }
+
+            };
+            int to_check_node_cnt = int(this->front_layer.size()*NODE_PRIOR_TH+1);
+            Node* node;
+            for (int i = 0; i<to_check_node_cnt; i++) {
+                node = this->front_layer[i];
+                int phy_bit_ctl = this->l2p_layout[node->cx_gate->control];
+                int phy_bit_tgt = this->l2p_layout[node->cx_gate->target];
+                
+                vector<Gate> tmp_ops1,tmp_ops2;
+                //判断是否可以执行该CX
+                get_swaps(tmp_ops1, phy_bit_ctl);
+                get_swaps(tmp_ops2, phy_bit_tgt);
                 
             }
             return operations;
@@ -414,28 +523,6 @@ class Mapper {
                apply_swap(min_score_gate);
         }
 
-        void route_fast() {
-            this->update_front_layer();
-            float routing_flag_rate = 0;// the range is (0,0.5]   0.5->group choose  0->single choose
-            while (this->front_layer.size() > 0) {
-                vector<int> key_qbit;
-                auto ready_ops = this->get_operations_sort(key_qbit);     
-                routing_flag_rate = 1.0*this->front_layer.size()/this->circuit->qubit_number;
-                //vector<const Gate*> min_score_comb;
-                if (routing_flag_rate > SINGLE_GROUP_TH)
-                    this->routing_group_fast(key_qbit, ready_ops);
-                else
-                    this->routing_single_fast(ready_ops);
-                //this->apply_comb(min_score_comb);
-                this->check_front_layer_change();
-            }
-
-            for (size_t i = 0; i<circuit->left_h_gate_each_bit.size(); i++){
-                for (Gate *gate:circuit->left_h_gate_each_bit[i]) {
-                    output->push_back(Gate(H, gate->id, l2p_layout[gate->control],-1));
-                }
-            }
-        }
         float score_single(Gate* op, int now_front_dist, int now_extend_dist) {
             int phy_q1,phy_q2;
             int part_max_decay = 0;
@@ -453,11 +540,51 @@ class Mapper {
                     rate += DECAY_WEIGHT*part_max_decay/max_decay;
             }
             if (extended_layer.size() == 0) {
-                return  rate * (front_score/front_layer.size());
+                return  rate * (1.0*front_score/front_layer.size());
             } else {
-                return  rate * (front_score/front_layer.size() + 0.1*extend_score/extended_layer.size());
+                return  rate * (1.0*front_score/front_layer.size() + 0.1*extend_score/extended_layer.size());
             }
         }
+
+        void route_fast(const vector<int> &target_l2p) {
+            this->update_front_layer();
+            float routing_flag_rate = 0;// the range is (0,0.5]   0.5->group choose  0->single choose
+            while (this->front_layer.size() > 0) {
+                vector<int> key_qbit;
+                auto ready_ops = this->get_operations_sort(key_qbit);
+                routing_flag_rate = 1.0*this->front_layer.size()/this->circuit->qubit_number;
+                //vector<const Gate*> min_score_comb;
+                if (routing_flag_rate > SINGLE_GROUP_TH)
+                    this->routing_group_fast(key_qbit, ready_ops);
+                else
+                    this->routing_single_fast(ready_ops);
+                //this->apply_comb(min_score_comb);
+                this->check_front_layer_change();
+                if (this->check_nearing_end()) {
+                    break;
+                }
+            }
+
+            while (this->front_layer.size() > 0) {
+                vector<int> key_qbit;
+                auto ready_ops = this->get_operations_sort(key_qbit);
+                routing_flag_rate = 1.0*this->front_layer.size()/this->circuit->qubit_number;
+                //vector<const Gate*> min_score_comb;
+                if (routing_flag_rate > SINGLE_GROUP_TH)
+                    this->routing_group_fast_token(key_qbit, ready_ops, target_l2p);
+                else
+                    this->routing_single_fast_token(ready_ops, target_l2p);
+                //this->apply_comb(min_score_comb);
+                this->check_front_layer_change();
+            }
+
+            for (size_t i = 0; i<circuit->left_h_gate_each_bit.size(); i++){
+                for (Gate *gate:circuit->left_h_gate_each_bit[i]) {
+                    output->push_back(Gate(H, gate->id, l2p_layout[gate->control],-1));
+                }
+            }
+        }
+        
 
         void routing_group_fast(vector<int> &key_qbit, vector<vector<Gate>> &ready_ops) {
             static vector<int> bit_has_added(this->chip->qubit_number, 0);
@@ -526,17 +653,122 @@ class Mapper {
             float rate = 1.0;
             if (this->max_decay != 0) {
                 if (min_decay < max_decay)
-                    rate += 0.1*(part_max_decay-min_decay)/(max_decay-min_decay);
+                    rate += DECAY_WEIGHT_FAST*(part_max_decay-min_decay)/(max_decay-min_decay);
                 else
-                    rate += 0.1*part_max_decay/max_decay;
+                    rate += DECAY_WEIGHT_FAST*part_max_decay/max_decay;
             }
             if (extended_layer.size() == 0) {
-                return  rate * (front_score/front_layer.size());
+                return  rate * (1.0*front_score/front_layer.size());
             } else {
-                return  rate * (front_score/front_layer.size() + 0.1*extend_score/extended_layer.size());
+                return  rate * (1.0*front_score/front_layer.size() + 0.1*extend_score/extended_layer.size());
             }
         }
+
+
         
+        void routing_group_fast_token(vector<int> &key_qbit, vector<vector<Gate>> &ready_ops, const vector<int> &target_l2p) {
+            static vector<int> bit_has_added(this->chip->qubit_number, 0);
+            bit_has_added.assign(this->chip->qubit_number, 0);
+            Gate *min_score_gate;
+            float min_score = FLT_MAX;
+            float tmp_score;
+            int now_front_dist;
+            int now_extend_dist;
+            while (1)
+            {
+                min_score_gate = nullptr;
+                now_front_dist = this->front_dist(this->chip->dist);
+                now_extend_dist = this->extend_dist(this->chip->dist);
+
+                TopKSmallest top_k_smallest(K);
+
+                for(size_t i = 0; i<static_cast<size_t>(ready_ops.size()); i++) {
+                    if (bit_has_added[key_qbit[i]]) continue;
+                    for(size_t j = 0; j<static_cast<size_t>(ready_ops[i].size()*SWAP_PRIOR_TH+1); j++){
+                        if (bit_has_added[ready_ops[i][j].control] || bit_has_added[ready_ops[i][j].target]) continue;
+                        //min_score_comb.push_back(&ready_ops[i][j]);
+                        tmp_score = this->score_single_fast(&ready_ops[i][j], now_front_dist, now_extend_dist);
+                        ready_ops[i][j].score = tmp_score;
+                        top_k_smallest.add(&ready_ops[i][j]);
+                        if (min_score>tmp_score) {
+                            min_score = tmp_score;
+                            min_score_gate = &ready_ops[i][j];
+                        }
+                    }
+                }
+                if (!min_score_gate) break;
+                
+                int phy1, phy2;
+                int logical_q1, logical_q2;
+                int lq1_target_phyq, lq2_target_phyq;
+                int delta_dist = 0;
+                int min_delta_dist = INT32_MAX;
+                for (Gate* gate:top_k_smallest.get()) {
+                    if (gate->score - min_score > ROUTETOKEN_DELTA) break;
+                    phy1 = gate->control;
+                    phy2 = gate->target;
+                    logical_q1 = this->p2l_layout[phy1];
+                    logical_q2 = this->p2l_layout[phy2];
+                    lq1_target_phyq = target_l2p[logical_q1];
+                    lq2_target_phyq = target_l2p[logical_q2];
+                    delta_dist = chip->dist[lq1_target_phyq][phy2] - chip->dist[lq1_target_phyq][phy1]
+                                +chip->dist[lq2_target_phyq][phy1] - chip->dist[lq2_target_phyq][phy2];
+                    if (min_delta_dist > delta_dist) {
+                        min_delta_dist = delta_dist;
+                        min_score_gate = gate;
+                    }
+                }
+
+                apply_swap(min_score_gate);
+                bit_has_added[min_score_gate->control] = 1;
+                bit_has_added[min_score_gate->target] = 1;
+            }
+        }
+
+        void routing_single_fast_token(vector<vector<Gate>> &ready_ops, const vector<int> &target_l2p) {
+            Gate *min_score_gate = nullptr;
+            float min_score = FLT_MAX;
+            float tmp_score;
+            int now_front_dist = this->front_dist(this->chip->dist);
+            int now_extend_dist = this->extend_dist(this->chip->dist);
+            TopKSmallest top_k_smallest(K);
+            for(size_t i = 0; i<static_cast<size_t>(ready_ops.size()); i++) {
+                for(size_t j = 0; j<static_cast<size_t>(ready_ops[i].size()*SWAP_PRIOR_TH+1); j++){
+                    tmp_score = this->score_single_fast(&ready_ops[i][j], now_front_dist, now_extend_dist);
+                    ready_ops[i][j].score = tmp_score;
+                    top_k_smallest.add(&ready_ops[i][j]);
+                    if (min_score>tmp_score) {
+                        min_score = tmp_score;
+                        min_score_gate = &ready_ops[i][j];
+                    }
+                }
+            }
+            if (min_score_gate) {
+                int phy1, phy2;
+                int logical_q1, logical_q2;
+                int lq1_target_phyq, lq2_target_phyq;
+                int delta_dist = 0;
+                int min_delta_dist = INT32_MAX;
+                for (Gate* gate:top_k_smallest.get()) {
+                    if (gate->score - min_score > ROUTETOKEN_DELTA) break;
+                    phy1 = gate->control;
+                    phy2 = gate->target;
+                    logical_q1 = this->p2l_layout[phy1];
+                    logical_q2 = this->p2l_layout[phy2];
+                    lq1_target_phyq = target_l2p[logical_q1];
+                    lq2_target_phyq = target_l2p[logical_q2];
+                    delta_dist = chip->dist[lq1_target_phyq][phy2] - chip->dist[lq1_target_phyq][phy1]
+                                +chip->dist[lq2_target_phyq][phy1] - chip->dist[lq2_target_phyq][phy2];
+                    if (min_delta_dist > delta_dist) {
+                        min_delta_dist = delta_dist;
+                        min_score_gate = gate;
+                    }
+                }
+                apply_swap(min_score_gate);
+            }
+        }
+
+
         int dist_change_after_swap(Gate* op, vector<int> &logical_qubit_in_layer_node_index, vector<Node*> &layer) { 
             int logical_q1 = this->p2l_layout[op->control];
             int logical_q2 = this->p2l_layout[op->target];
@@ -614,7 +846,9 @@ class Mapper {
             
             phy_q1 = gate->control;
             phy_q2 = gate->target;
-            //std::cout<<"swap "<<phy_q1<<" "<<phy_q2<<std::endl;
+            #ifdef DEBUG
+            std::cout<<"swap "<<phy_q1<<" "<<phy_q2<<std::endl;
+            #endif
             two_bit_max_decay = std::max(this->decay[phy_q1], this->decay[phy_q2]);
             this->decay[phy_q1] = two_bit_max_decay + 3*this->chip->coupling_map[phy_q1][phy_q2];
             this->decay[phy_q2] = this->decay[phy_q1];
@@ -682,7 +916,6 @@ class Mapper {
             if (front_layer_change) this->update_front_layer();
             return front_layer_change;
         }
-
 
         int run_H_gate_before_op(int phy_qubit, int latest_end_time) {
             int logical_qubit = this->p2l_layout[phy_qubit];
@@ -799,21 +1032,30 @@ class Mapper {
             }
             min_decay = decay[min_decay_qubit];
         }
-        
+
+        bool check_nearing_end() {
+            for (auto node:front_layer) {
+                if (circuit->depth - node->layer <= NEAREND_LAYER) return true;
+            }
+            return false;
+        }
 
 };
 
 
 int main(int argc, char **argv) {
-    if (argc < 5) {
+    if (argc < 7) {
         return 1;
     }
     char *chip_path = argv[1];
     char *circuit_path = argv[2];
     char *result_path = argv[3];
     char *route_mode = argv[4]; // online(fast)  offline(normal)    -->  'f',  'n'
+    K = atoi(argv[5]);
+    NEAREND_LAYER = atoi(argv[6]);
     std::deque<Gate> output;
     std::vector<double> run_time_list;
+    std::vector<int> max_decay_list;
     double run_time;
     auto circuits = load_circuits(circuit_path);
     Circuit *c = circuits[0];
@@ -828,18 +1070,10 @@ int main(int argc, char **argv) {
     clock_t end_time = clock();
     run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
     run_time_list.push_back(run_time);
+    max_decay_list.push_back(mp.max_decay);
     double token_swap_time = 0;
-    vector last_final_mapping = mp.l2p_layout;
-
-    void (Mapper::*subcircuit_route_method)();
-    if (route_mode[0] == 'f') {
-        subcircuit_route_method = &Mapper::route_fast;
-    }
-    else {
-        subcircuit_route_method = &Mapper::route;
-    }
-
-
+    vector last_final_mapping = mp.p2l_layout;
+    vector<int> target_l2p = mp.l2p_layout;
     for (size_t i = 1; i<circuits.size(); i++) {
         mp.reload(circuits[i]);
         if (i % 2 == 0) {
@@ -852,10 +1086,15 @@ int main(int argc, char **argv) {
             //subcircuit
             //token swap
             clock_t start_time = clock();
-            (mp.*subcircuit_route_method)();
+            if (route_mode[0] == 'f') {
+                mp.route_fast(target_l2p);
+            }
+            else {
+                mp.route();
+            }
             clock_t end_time = clock();
             run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
-            auto swap_sequence = TS4(chip->coupling_map, mp.p2l_layout, last_final_mapping, &token_swap_time);
+            auto swap_sequence = TS4_new(chip->coupling_map, mp.p2l_layout, last_final_mapping, &token_swap_time);
             for (auto swap:swap_sequence) {
                 auto gate = Gate(SWAP, 0, swap[0], swap[1]);
                 mp.apply_swap(&gate);
@@ -869,13 +1108,14 @@ int main(int argc, char **argv) {
             //     }
             // }
         }
-        
         last_final_mapping = mp.p2l_layout;
+        target_l2p = mp.l2p_layout;
         run_time_list.push_back(run_time);
+        max_decay_list.push_back(mp.max_decay);
     }
     std::cout<<std::endl;
     std::cout<<result_path<<std::endl;
-    dump_result(result_path, output, chip->qubit_number, run_time_list);
+    dump_result(result_path, output, chip->qubit_number, run_time_list, max_decay_list);
     for (Circuit *circuit:circuits) {
         delete circuit;
     }

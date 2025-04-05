@@ -1,7 +1,7 @@
 # 定义编译器
 CXX = g++
-CXXFLAGS = -Wall -O3 -std=c++17  # 编译选项，可以根据需要调整
-
+#CXXFLAGS = -Wall -g -std=c++17  -DDEBUG# 编译选项，可以根据需要调整
+CXXFLAGS = -Wall -O3 -std=c++17
 # 定义目录
 SRC_DIR = src
 BUILD_DIR = build

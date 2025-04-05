@@ -31,12 +31,13 @@ class Gate
 {
     public:
         Gate(Gate_type g_t, int i, int c, int t):
-            type(g_t),id(i), control(c),target(t),owner(nullptr){}
+            type(g_t),id(i), control(c),target(t),owner(nullptr),score(-1){}
         Gate_type type;
         int id;
         int control;
         int target;
         Node* owner;
+        float score; // 用于记录swap操作的得分
 };
 
 
@@ -47,8 +48,10 @@ class Circuit
         Circuit(char*);
         Circuit& operator=(const Circuit &);
         ~Circuit();
+        int get_depth();
         bool load(char *);
         int qubit_number;
+        int depth;
         int type;
         vector<Node*> node_list;
         vector<Gate*> gate_list;

@@ -16,11 +16,14 @@ void Node::add_successors(Node *n) {
 
 Circuit::Circuit() {
     qubit_number = 0;
+    depth = 0;
 }
 
 Circuit::Circuit(char *file_path) {
     qubit_number = 0;
+    depth = 0;
     this->load(file_path);
+    this->get_depth();
 }
 
 bool Circuit::load(char* file_path) {
@@ -115,4 +118,14 @@ Circuit& Circuit::operator=(const Circuit & other) {
 
 Circuit::~Circuit(){
     for(Gate* gate:this->gate_list) delete gate;
+}
+
+int Circuit::get_depth() {
+    if (this->depth != 0) return this->depth;
+    int max_layer = 0;
+    for (Node* node : this->node_list) {
+        if (node->layer > max_layer) max_layer = node->layer;
+    }
+    this->depth = max_layer;
+    return max_layer;
 }
