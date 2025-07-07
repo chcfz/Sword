@@ -17,16 +17,16 @@
 #include <cmath>
 #include <random>
 #include <regex>
+#include <climits>
 //const static float EXTEND_RATE = 0.5;
 //const static int LOOK_AHEAD_DEPTH = 10;
-float DECAY_WEIGHT = 1.0;
+float DECAY_WEIGHT = 0.1;
 float SINGLE_GROUP_TH = 0.25;
 float SWAP_PRIOR_TH = 0.4;
-float NODE_PRIOR_TH = 0.5;
-bool opt_fidelity = false;
+float NODE_PRIOR_TH = 0.2;
 
 std::vector<Circuit *> load_circuits(char *file_path) {
-    std::ifstream file(file_path); // 打开文件
+    std::ifstream file(file_path);
     if (!file.is_open()) {
         std::cout << "Failed to open file." << std::endl;
         exit(0);
@@ -267,9 +267,13 @@ class Mapper {
         vector<vector<Gate>> get_operations(vector<int> &key_qubit){
             //[bit][op]
             vector<vector<Gate>> operations;
+            operations.reserve(this->circuit->qubit_number); // 预分配空间
+            
             vector<int> has_process(this->chip->qubit_number, 0);
-
+            key_qubit.clear();
+            
             auto get_swaps = [&](vector<Gate> &tmp_ops, int phy_bit, int pair_phy_bit) {
+                tmp_ops.reserve(this->chip->neibors[phy_bit].size()); // 预分配空间
                 for (int neib:this->chip->neibors[phy_bit]) {
                     if (has_process[neib])
                         continue;
@@ -277,42 +281,42 @@ class Mapper {
                 }
                 has_process[phy_bit] = 1;
                                 
-                if (tmp_ops.size()) {
-
-                    std::sort(tmp_ops.begin(), tmp_ops.end(), [this, pair_phy_bit](Gate &i, Gate &j) {
+                if (!tmp_ops.empty()) {
+                    std::sort(tmp_ops.begin(), tmp_ops.end(), [this, pair_phy_bit](const Gate &i, const Gate &j) {
                         return this->chip->dist[i.target][pair_phy_bit] < this->chip->dist[j.target][pair_phy_bit];
                     });
-
                     operations.push_back(std::move(tmp_ops));
                     key_qubit.push_back(phy_bit);
                 }
-
             };
-            int to_check_node_cnt = int(this->front_layer.size()*NODE_PRIOR_TH+1);
-            Node* node;
-            for (int i = 0; i<to_check_node_cnt; i++) {
-                node = this->front_layer[i];
+            
+            // 只检查前NODE_PRIOR_TH比例的节点，减少计算量
+            const int to_check_node_cnt = std::min(
+                static_cast<int>(this->front_layer.size()*NODE_PRIOR_TH+1),
+                static_cast<int>(this->front_layer.size())
+            );
+            
+            for (int i = 0; i < to_check_node_cnt; i++) {
+                auto node = this->front_layer[i];
                 int phy_bit_ctl = this->l2p_layout[node->cx_gate->control];
                 int phy_bit_tgt = this->l2p_layout[node->cx_gate->target];
                 
-                vector<Gate> tmp_ops1,tmp_ops2;
+                vector<Gate> tmp_ops1, tmp_ops2;
                 //判断是否可以执行该CX
                 get_swaps(tmp_ops1, phy_bit_ctl, phy_bit_tgt);
                 get_swaps(tmp_ops2, phy_bit_tgt, phy_bit_ctl);
-                
             }
             return operations;
-            
         }
 
         void route() {
             this->update_front_layer();
             float routing_flag_rate = 0;// the range is (0,0.5]   0.5->group choose  0->single choose
-            while (this->front_layer.size() > 0) {
-                vector<int> key_qbit;
+            vector<int> key_qbit;
+            key_qbit.reserve(circuit->qubit_number);
+            while (!this->front_layer.empty()) {
                 auto ready_ops = this->get_operations(key_qbit);     
                 routing_flag_rate = 1.0*this->front_layer.size()/this->circuit->qubit_number;
-                //vector<const Gate*> min_score_comb;
                 if (routing_flag_rate > SINGLE_GROUP_TH)
                     this->routing_group(key_qbit, ready_ops);
                 else
@@ -331,7 +335,7 @@ class Mapper {
         void routing_group(vector<int> &key_qbit, vector<vector<Gate>> &ready_ops) {
             static vector<int> bit_has_added(this->chip->qubit_number, 0);
             bit_has_added.assign(this->chip->qubit_number, 0);
-            Gate *min_score_gate;
+            Gate *min_score_gate = nullptr;
             float min_score = FLT_MAX;
             float tmp_score;
             int now_front_dist;
@@ -383,58 +387,32 @@ class Mapper {
                apply_swap(min_score_gate);
         }
 
-        float score_fidelity(Gate* op) {
-            //static const float M_1_MAX_T1 = 1.0/(chip->max_T1);
-            int phy_q1,phy_q2;
-            int part_max_decay = 0;
-            phy_q1 = op->control;
-            phy_q2 = op->target;
-            part_max_decay = std::max(this->decay[phy_q1], this->decay[phy_q2]);
-            swap(op);
-            //total_consume_time += 3 * this->chip->coupling_map[phy_q1][phy_q2];
-            int front_score = this->front_dist(this->chip->fidelity_dist);
-            int extend_score = this->extend_dist(this->chip->fidelity_dist);
-            //恢复
-            swap(op);
-            float rate = 1.0;
-            if (this->max_decay != 0) {
-                if (min_decay < max_decay)
-                    rate += DECAY_WEIGHT*(part_max_decay-min_decay)/(max_decay-min_decay);
-                else
-                    rate += DECAY_WEIGHT*part_max_decay/max_decay;
-            }
-            return  rate * (front_score + 0.1*extend_score);
-        }
-
-        float score_single(Gate* op, int now_front_dist, int now_extend_dist) {
-            //static const float M_1_MAX_CX_DELTA = 1.0/(chip->max_cx);
-            int phy_q1,phy_q2;
-            int part_max_decay = 0;
-            phy_q1 = op->control;
-            phy_q2 = op->target;
-            part_max_decay = std::max(this->decay[phy_q1], this->decay[phy_q2]);
+        float score_single(const Gate* op, int now_front_dist, int now_extend_dist) {
+            int phy_q1 = op->control;
+            int phy_q2 = op->target;
+            int part_max_decay = std::max(this->decay[phy_q1], this->decay[phy_q2]);
             
             int front_score = now_front_dist + this->dist_change_after_swap(op, logical_qubit_in_front_layer_node_index, front_layer);
             int extend_score = now_extend_dist + this->dist_change_after_swap(op, logical_qubit_in_extended_layer_node_index, extended_layer);
-            //int tmp0 = front_dist(this->chip->dist);
-            // swap(op);
-            // int tmp1 = front_dist(this->chip->dist);
-            // int tmp2 = extend_dist(this->chip->dist);
-            // //恢复
-            // swap(op);
+            
             float rate = 1.0;
-            if (this->max_decay != 0) {
-                rate += DECAY_WEIGHT*part_max_decay/this->max_decay;
+            if (this->max_decay > 0) {
+                rate += DECAY_WEIGHT * (part_max_decay-min_decay) / (this->max_decay-min_decay);
             }
-            if (extended_layer.size() == 0) {
-                return  rate * (front_score/front_layer.size());
+            
+            const size_t front_size = front_layer.size();
+            const size_t extend_size = extended_layer.size();
+            
+            if (extend_size == 0) {
+                return rate * (front_score / static_cast<float>(front_size));
             } else {
-                return  rate * (front_score/front_layer.size() + 0.1*extend_score/extended_layer.size());
+                return rate * (front_score / static_cast<float>(front_size) + 
+                              0.1 * extend_score / static_cast<float>(extend_size));
             }
         }
 
         
-        int dist_change_after_swap(Gate* op, vector<int> &logical_qubit_in_layer_node_index, vector<Node*> &layer) { 
+        int dist_change_after_swap(const Gate* op, const vector<int> &logical_qubit_in_layer_node_index, const vector<Node*> &layer) { 
             int logical_q1 = this->p2l_layout[op->control];
             int logical_q2 = this->p2l_layout[op->target];
             int node_id1 = logical_qubit_in_layer_node_index[logical_q1];
@@ -464,28 +442,24 @@ class Mapper {
             return delta_dist;
         }
         
-        int front_dist(vector<vector<int>> &dist_m) {
-            int phy_q1,phy_q2;
-            int total_end_time = 0;
-            Gate* gate;
-            for (auto node:this->front_layer) {
-                gate = node->cx_gate;
-                phy_q1 = this->l2p_layout[gate->control];
-                phy_q2 = this->l2p_layout[gate->target];
-
-                total_end_time += dist_m[phy_q1][phy_q2];
-
+        int front_dist(const vector<vector<int>> &dist_m) {
+            int total_dist = 0;
+            
+            // 使用引用避免不必要的复制
+            for (const auto &node : this->front_layer) {
+                const int phy_q1 = this->l2p_layout[node->cx_gate->control];
+                const int phy_q2 = this->l2p_layout[node->cx_gate->target];
+                total_dist += dist_m[phy_q1][phy_q2];
             }
-            return total_end_time;
+            return total_dist;
         }
 
-        int extend_dist(vector<vector<int>> &dist_m) {
-            if (extended_layer.size()==0) return 0;
+        int extend_dist(const vector<vector<int>> &dist_m) {
+            if (extended_layer.empty()) return 0;
             int sum_dist = 0;
-            int q1,q2;
-            for (auto node:this->extended_layer) {
-                q1 = this->l2p_layout[node->cx_gate->control];
-                q2 = this->l2p_layout[node->cx_gate->target];
+            for (const auto &node : this->extended_layer) {
+                const int q1 = this->l2p_layout[node->cx_gate->control];
+                const int q2 = this->l2p_layout[node->cx_gate->target];
                 sum_dist += dist_m[q1][q2];
             }
             return sum_dist;
@@ -508,7 +482,6 @@ class Mapper {
         void apply_swap(Gate* gate) {
             int phy_q1,phy_q2;
             int two_bit_max_decay;
-
             phy_q1 = gate->control;
             phy_q2 = gate->target;
             //std::cout<<phy_q1<<" "<<phy_q2<<std::endl;
@@ -516,12 +489,12 @@ class Mapper {
             this->decay[phy_q1] = two_bit_max_decay + 3*this->chip->coupling_map[phy_q1][phy_q2];
             this->decay[phy_q2] = this->decay[phy_q1];
             this->max_decay = std::max(this->decay[phy_q1], this->max_decay);
-            if (phy_q1 == min_decay_qubit || phy_q2 == min_decay_qubit) {
-                for (size_t i = 0; i<this->decay.size(); i++) {
-                    if (decay[i] < decay[min_decay_qubit]) min_decay_qubit = i;
-                }
-                min_decay = decay[min_decay_qubit];
-            }
+            // if (phy_q1 == min_decay_qubit || phy_q2 == min_decay_qubit) {
+            //     for (size_t i = 0; i<this->decay.size(); i++) {
+            //         if (decay[i] < decay[min_decay_qubit]) min_decay_qubit = i;
+            //     }
+            //     min_decay = decay[min_decay_qubit];
+            // }
             swap(gate);
             if (last_swap_pair[phy_q1] == phy_q2 && last_swap_pair[phy_q2] == phy_q1) {
                 last_swap_gate[phy_q1].back()->id = -1;
@@ -562,20 +535,17 @@ class Mapper {
         }
 
         bool check_front_layer_change() {
-            int phy_q1,phy_q2;
-            bool front_layer_change = false;
-            for (auto node:front_layer) {
+            int phy_q1, phy_q2;
+            for (auto node : front_layer) {
                 phy_q1 = l2p_layout[node->cx_gate->control];
                 phy_q2 = l2p_layout[node->cx_gate->target];
                 if (chip->coupling_map[phy_q1][phy_q2]) {
-                    front_layer_change = true;
-                    break;
+                    this->update_front_layer();
+                    return true;
                 }
             }
-            if (front_layer_change) this->update_front_layer();
-            return front_layer_change;
+            return false;
         }
-
 
         int run_H_gate_before_op(int phy_qubit, int latest_end_time) {
             int logical_qubit = this->p2l_layout[phy_qubit];
@@ -640,17 +610,18 @@ class Mapper {
         }
 
         void update_front_layer() {
-
+            // 重置索引数组
             this->logical_qubit_in_front_layer_node_index.assign(this->circuit->qubit_number, -1);
             this->logical_qubit_in_extended_layer_node_index.assign(this->circuit->qubit_number, -1);
             vector<Node*> tmp;
-            int phy_q1,phy_q2;
-            for (size_t i =0 ; i<front_layer.size(); i++) {
-                phy_q1 = l2p_layout[front_layer[i]->cx_gate->control];
-                phy_q2 = l2p_layout[front_layer[i]->cx_gate->target];
+            tmp.reserve(this->front_layer.size()); // 预分配空间
+            
+            for (size_t i = 0; i < front_layer.size(); i++) {
+                int phy_q1 = l2p_layout[front_layer[i]->cx_gate->control];
+                int phy_q2 = l2p_layout[front_layer[i]->cx_gate->target];
                 if (chip->coupling_map[phy_q1][phy_q2]) {
                     run_node(front_layer[i]);
-                    for (auto node:front_layer[i]->successors) {
+                    for (auto node : front_layer[i]->successors) {
                         node->front_cnt--;
                         if (node->front_cnt == 0) {
                             front_layer.push_back(node);
@@ -664,31 +635,44 @@ class Mapper {
             }
             front_layer.swap(tmp);
             extended_layer.clear();
-            for (auto node:front_layer)
-            for (auto succ:node->successors) {
-                //借用has done, 防止重复添加
-                if (succ->has_done) continue;
-                if (succ->front_cnt == 1 ||succ->layer == node->layer+1){
-                    logical_qubit_in_extended_layer_node_index[succ->cx_gate->control] = extended_layer.size();
-                    logical_qubit_in_extended_layer_node_index[succ->cx_gate->target] = extended_layer.size();
-
-                    extended_layer.push_back(succ);
-                    succ->has_done = true;
+            for (auto node : front_layer) {
+                for (auto succ : node->successors) {
+                    if (succ->has_done) continue;
+                    
+                    // 只添加符合条件的节点
+                    if (succ->front_cnt == 1 || succ->layer == node->layer + 1) {
+                        logical_qubit_in_extended_layer_node_index[succ->cx_gate->control] = extended_layer.size();
+                        logical_qubit_in_extended_layer_node_index[succ->cx_gate->target] = extended_layer.size();
+                        
+                        extended_layer.push_back(succ);
+                        succ->has_done = true;
+                    }
                 }
             }
-
-            for (auto node:extended_layer)
-                node->has_done = false;        
-        
-            //同步decay 与real_decay;
-            this->max_decay = 0;
-            this->min_decay_qubit = 0;
-            for(int i = 0; i<this->chip->qubit_number; i++) {
-                decay[i] = real_decay[i];
-                max_decay = std::max(max_decay, decay[i]);
-                if (decay[min_decay_qubit] > decay[i]) min_decay_qubit = i;
+            
+            // 重置标记
+            for (auto node : extended_layer) {
+                node->has_done = false;
             }
-            min_decay = decay[min_decay_qubit];
+            
+            // 更新衰减值
+            this->max_decay = 0;
+            this->min_decay = INT_MAX;
+            this->min_decay_qubit = 0;
+            
+            for (int i = 0; i < this->chip->qubit_number; i++) {
+                decay[i] = real_decay[i];
+                
+                // 同时更新最大和最小值
+                if (decay[i] > max_decay) {
+                    max_decay = decay[i];
+                }
+                
+                if (decay[i] < min_decay) {
+                    min_decay = decay[i];
+                    min_decay_qubit = i;
+                }
+            }
         }
         
 
@@ -722,29 +706,7 @@ int main(int argc, char **argv) {
     clock_t end_time = clock();
     run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
     run_time_list.push_back(run_time);
-    double token_swap_time = 0;
-    vector last_final_mapping = mp.l2p_layout;
-    for (size_t i = 1; i<circuits.size(); i++) {
-        mp.reload(circuits[i]);
-        clock_t start_time = clock();
-        mp.route();
-        clock_t end_time = clock();
-        run_time = static_cast<double>(end_time-start_time)/ CLOCKS_PER_SEC;
-        if (token_swap_mode[0] == 't' && i % 2 == 1) {
-            //subcircuit
-            //token swap
-            auto swap_sequence = TS4(chip->coupling_map, mp.p2l_layout, last_final_mapping, &token_swap_time);
-            for (auto swap:swap_sequence) {
-                auto gate = Gate(SWAP, 0, swap[0], swap[1]);
-                mp.apply_swap(&gate);
-            }
-            run_time += token_swap_time;
-        }
-        last_final_mapping = mp.l2p_layout;
-        run_time_list.push_back(run_time);
-    }
-    std::cout<<std::endl;
-    std::cout<<result_path<<std::endl;
+
     dump_result(result_path, output, chip->qubit_number, run_time_list);
     for (Circuit *circuit:circuits) {
         delete circuit;
